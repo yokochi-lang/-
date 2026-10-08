@@ -5,6 +5,7 @@ import joblib
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
+import re
 
 # ページ設定
 st.set_page_config(page_title="🚤 競艇AI リアルタイム予想ツール", layout="centered")
@@ -34,16 +35,16 @@ ALL_JCD = {
 }
 
 # 開催場一覧の自動取得
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_active_venues():
     active_venues = {}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     for jcd, name in ALL_JCD.items():
         url = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno=1&jcd={jcd}&hd={today_str}"
         try:
-            res = requests.get(url, headers=headers, timeout=2)
-            if res.status_code == 200 and "is-fs12" in res.text:
+            res = requests.get(url, headers=headers, timeout=3)
+            if res.status_code == 200 and ("is-fs12" in res.text or "racelist" in res.text):
                 active_venues[jcd] = f"{name} ({jcd})"
         except Exception:
             continue
@@ -53,11 +54,11 @@ def get_active_venues():
 
     return active_venues
 
-# 出走表（選手名・勝率等）をWebスクレイピングで自動取得
-@st.cache_data(ttl=600)
+# 出走表（選手名・勝率等）をWebスクレイピングで自動取得（堅牢化版）
+@st.cache_data(ttl=300)
 def get_race_table(jcd, rno):
     url = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={rno}&jcd={jcd}&hd={today_str}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     try:
         res = requests.get(url, headers=headers, timeout=5)
@@ -65,32 +66,39 @@ def get_race_table(jcd, rno):
             return None
         
         soup = BeautifulSoup(res.text, "html.parser")
-        tbodies = soup.select("table tbody.is-fs12")
         
+        # 各艇のtbody要素を取得
+        tbodies = soup.select("table.is-w740 tbody")
+        if not tbodies or len(tbodies) < 6:
+            tbodies = soup.select("tbody.is-fs12")
+            
         if not tbodies or len(tbodies) < 6:
             return None
         
         racers = []
-        for i, tbody in enumerate(tbodies[:6]):
-            # 選手名・級別
-            name_tag = tbody.select_one(".is-name a")
+        for i in range(6):
+            tbody = tbodies[i]
+            
+            # 選手名
+            name_tag = tbody.select_one(".is-name a") or tbody.select_one(".is-name")
+            name = name_tag.text.strip().replace(" ", "").replace(" ", "") if name_tag else f"{i+1}号艇"
+            # 改行等が含まれる場合のクレンジング
+            name = name.split("\n")[0]
+            
+            # 級別
             class_tag = tbody.select_one(".is-name span")
-            name = name_tag.text.strip().replace(" ", "").replace(" ", "") if name_tag else f"レーサー{i+1}"
             racer_class = class_tag.text.strip() if class_tag else "B1"
             
-            # 全国勝率
-            win_rate_tds = tbody.select("td")
+            # 全国勝率の抽出（数値形式 X.XX を正規表現で抽出）
+            text_all = tbody.text
+            rates = re.findall(r"\b[1-9]\.\d{2}\b", text_all)
+            
+            # 抽出された勝率の中から妥当なものを選択（デフォルトは5.00）
             win_rate = 5.00
-            for td in win_rate_tds:
-                txt = td.text.strip()
-                try:
-                    val = float(txt)
-                    if 1.0 <= val <= 9.0 and val != win_rate:
-                        win_rate = val
-                        break
-                except ValueError:
-                    continue
-
+            if rates:
+                # 全国勝率は通常1番目または2番目に出現する数値を採用
+                win_rate = float(rates[0])
+            
             racers.append({
                 "艇番": i + 1,
                 "選手名": name,
@@ -99,7 +107,7 @@ def get_race_table(jcd, rno):
             })
             
         return pd.DataFrame(racers)
-    except Exception:
+    except Exception as e:
         return None
 
 # サイドバー設定
@@ -125,16 +133,13 @@ with st.spinner("出走表データを取得中..."):
 
 if df_racers is not None:
     st.markdown("### 📋 公式出走表")
-    # 出走表を表形式で綺麗に表示
     st.dataframe(
         df_racers[["艇番", "選手名", "級別", "全国勝率"]],
         use_container_width=True,
         hide_index=True
     )
 
-    # 予想実行ボタン
     if st.button("🔥 このレースのAI予想を計算する", type="primary"):
-        # 勝率データを抽出してモデルに入力
         win_rates = df_racers["全国勝率"].tolist()
         input_data = pd.DataFrame([{
             "1号艇_勝率": win_rates[0], "2号艇_勝率": win_rates[1], "3号艇_勝率": win_rates[2],
@@ -143,7 +148,6 @@ if df_racers is not None:
 
         probs = model.predict_proba(input_data)[0]
 
-        # 3連単全120通り算出
         sanrentan_list = []
         for i in range(1, 7):
             for j in range(1, 7):
@@ -154,7 +158,6 @@ if df_racers is not None:
                         p3 = probs[k - 1] / (1 - p1 - p2 + 1e-6)
                         combo_prob = p1 * p2 * p3
                         
-                        # 選手名付きで買い目を表示
                         r1_name = df_racers.loc[i-1, "選手名"]
                         r2_name = df_racers.loc[j-1, "選手名"]
                         r3_name = df_racers.loc[k-1, "選手名"]
@@ -176,4 +179,4 @@ if df_racers is not None:
         )
 
 else:
-    st.warning("⚠️ 本日の出走表データが取得できませんでした（ナイター場または時間外の可能性があります）。")
+    st.warning("⚠️ 出走表データの取得に失敗しました。時間をおいて再読み込みするか、別の場・レースを選択してください。")
