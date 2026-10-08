@@ -3,3 +3,4 @@ pandas
 lightgbm
 joblib
 scikit-learn
+beautifulsoup4
