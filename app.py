@@ -2,12 +2,21 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import requests
+from datetime import datetime
 
 # ページ設定
-st.set_page_config(page_title="🚤 競艇AI予想ツール", layout="centered")
+st.set_page_config(page_title="🚤 競艇AI リアルタイム予想ツール", layout="centered")
 
+# 本日の日付をフォーマット取得（例: 2026年10月08日 (木)）
+weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+now = datetime.now()
+date_str = f"📅 {now.strftime('%Y年%m月%d日')} ({weekdays[now.weekday()]})"
+
+# メインタイトルと日付の表示
+st.caption(date_str)
 st.title("🚤 競艇AI リアルタイム予想ツール")
-st.caption("AIが各艇の勝率から3連単の推奨買い目を自動算出します")
+st.caption("本日の開催場を自動判定し、3連単の推奨買い目を算出します")
 
 # AIモデルの読み込み
 @st.cache_resource
@@ -16,16 +25,54 @@ def load_model():
 
 model = load_model()
 
-# サイドバー：レース選択
+# 全国24場の一覧辞書 (場コード: 場名)
+ALL_JCD = {
+    "01": "桐生", "02": "戸田", "03": "江戸川", "04": "平和島", "05": "多摩川", "06": "浜名湖",
+    "07": "蒲郡", "08": "常滑", "09": "津", "10": "三国", "11": "びわこ", "12": "住之江",
+    "13": "尼崎", "14": "鳴門", "15": "丸亀", "16": "児島", "17": "宮島", "18": "徳山",
+    "19": "下関", "20": "若松", "21": "芦屋", "22": "福岡", "23": "唐津", "24": "大村"
+}
+
+# 本日の開催場を判定して取得する関数
+@st.cache_data(ttl=3600)  # 1時間キャッシュ
+def get_active_venues():
+    today_str = datetime.now().strftime("%Y%m%d")
+    active_venues = {}
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for jcd, name in ALL_JCD.items():
+        url = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno=1&jcd={jcd}&hd={today_str}"
+        try:
+            res = requests.get(url, headers=headers, timeout=2)
+            if res.status_code == 200 and "is-fs12" in res.text:
+                active_venues[jcd] = f"{name} ({jcd})"
+        except Exception:
+            continue
+
+    if not active_venues:
+        return {jcd: f"{name} ({jcd})" for jcd, name in ALL_JCD.items()}
+
+    return active_venues
+
+# サイドバー設定
 st.sidebar.header("レース設定")
-jcd = st.sidebar.selectbox("開催場", ["大村 (24)", "平和島 (04)", "住之江 (12)", "桐生 (01)"])
+
+with st.sidebar:
+    with st.spinner("本日の開催場を確認中..."):
+        active_venues = get_active_venues()
+
+selected_jcd = st.sidebar.selectbox(
+    "本日開催中の競艇場",
+    options=list(active_venues.keys()),
+    format_func=lambda x: active_venues[x]
+)
+
 rno = st.sidebar.slider("レース番号", 1, 12, 1)
 
-st.subheader(f"📍 {jcd} - 第{rno}レース")
+st.subheader(f"📍 {active_venues[selected_jcd]} - 第{rno}レース")
 
-# 入力フォーム（各艇の勝率）
-st.write("▼ 各艇の全国勝率を入力してください（初期値はサンプル数値です）")
-
+# 出走表データ入力
+st.write("▼ 各艇の全国勝率を入力してください")
 col1, col2 = st.columns(2)
 with col1:
     r1 = st.number_input("1号艇 勝率", value=7.25, step=0.1)
