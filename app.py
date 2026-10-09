@@ -34,46 +34,28 @@ ALL_JCD = {
     "19": "下関", "20": "若松", "21": "芦屋", "22": "福岡", "23": "唐津", "24": "大村"
 }
 
-# 開催場一覧の自動取得
-@st.cache_data(ttl=1800)
-def get_active_venues():
-    active_venues = {}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
-    for jcd, name in ALL_JCD.items():
-        url = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno=1&jcd={jcd}&hd={today_str}"
-        try:
-            res = requests.get(url, headers=headers, timeout=3)
-            if res.status_code == 200 and ("is-fs12" in res.text or "racelist" in res.text):
-                active_venues[jcd] = f"{name} ({jcd})"
-        except Exception:
-            continue
-
-    if not active_venues:
-        return {jcd: f"{name} ({jcd})" for jcd, name in ALL_JCD.items()}
-
-    return active_venues
-
-# 出走表（選手名・勝率等）をWebスクレイピングで自動取得（堅牢化版）
-@st.cache_data(ttl=300)
-def get_race_table(jcd, rno):
+# 出走表取得関数（エラー理由を返すデバッグ対応版）
+def get_race_table_debug(jcd, rno):
     url = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={rno}&jcd={jcd}&hd={today_str}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "ja-JP,ja;q=0.9"
+    }
     
     try:
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code != 200:
-            return None
+            return None, f"HTTPステータスコード異常: {res.status_code}"
         
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 各艇のtbody要素を取得
-        tbodies = soup.select("table.is-w740 tbody")
+        # 該当レースの出走表が存在するか確認
+        tbodies = soup.select("tbody.is-fs12")
         if not tbodies or len(tbodies) < 6:
-            tbodies = soup.select("tbody.is-fs12")
+            tbodies = soup.select("table.is-w740 tbody")
             
         if not tbodies or len(tbodies) < 6:
-            return None
+            return None, f"出走表のHTML要素（tbody）が見つかりませんでした。(取得サイズ: {len(res.text)} bytes)"
         
         racers = []
         for i in range(6):
@@ -82,22 +64,16 @@ def get_race_table(jcd, rno):
             # 選手名
             name_tag = tbody.select_one(".is-name a") or tbody.select_one(".is-name")
             name = name_tag.text.strip().replace(" ", "").replace(" ", "") if name_tag else f"{i+1}号艇"
-            # 改行等が含まれる場合のクレンジング
             name = name.split("\n")[0]
             
             # 級別
             class_tag = tbody.select_one(".is-name span")
             racer_class = class_tag.text.strip() if class_tag else "B1"
             
-            # 全国勝率の抽出（数値形式 X.XX を正規表現で抽出）
+            # 全国勝率
             text_all = tbody.text
             rates = re.findall(r"\b[1-9]\.\d{2}\b", text_all)
-            
-            # 抽出された勝率の中から妥当なものを選択（デフォルトは5.00）
-            win_rate = 5.00
-            if rates:
-                # 全国勝率は通常1番目または2番目に出現する数値を採用
-                win_rate = float(rates[0])
+            win_rate = float(rates[0]) if rates else 5.00
             
             racers.append({
                 "艇番": i + 1,
@@ -106,30 +82,26 @@ def get_race_table(jcd, rno):
                 "全国勝率": win_rate
             })
             
-        return pd.DataFrame(racers)
+        return pd.DataFrame(racers), "SUCCESS"
     except Exception as e:
-        return None
+        return None, f"例外エラーが発生しました: {str(e)}"
 
-# サイドバー設定
+# サイドバー設定（全24場をダイレクトに選択可能化）
 st.sidebar.header("⚙️ レース選択")
 
-with st.sidebar:
-    with st.spinner("本日の開催場を確認中..."):
-        active_venues = get_active_venues()
-
 selected_jcd = st.sidebar.selectbox(
-    "本日開催中の競艇場",
-    options=list(active_venues.keys()),
-    format_func=lambda x: active_venues[x]
+    "競艇場を選択",
+    options=list(ALL_JCD.keys()),
+    format_func=lambda x: f"{ALL_JCD[x]} ({x})"
 )
 
 rno = st.sidebar.slider("レース番号", 1, 12, 1)
 
-st.subheader(f"📍 {active_venues[selected_jcd]} - 第{rno}レース")
+st.subheader(f"📍 {ALL_JCD[selected_jcd]} - 第{rno}レース")
 
 # 出走表の自動ロード
 with st.spinner("出走表データを取得中..."):
-    df_racers = get_race_table(selected_jcd, rno)
+    df_racers, status_msg = get_race_table_debug(selected_jcd, rno)
 
 if df_racers is not None:
     st.markdown("### 📋 公式出走表")
@@ -179,4 +151,5 @@ if df_racers is not None:
         )
 
 else:
-    st.warning("⚠️ 出走表データの取得に失敗しました。時間をおいて再読み込みするか、別の場・レースを選択してください。")
+    st.error(f"⚠️ 出走表データが取得できませんでした。")
+    st.info(f"🔍 **詳細エラー情報:** {status_msg}")
